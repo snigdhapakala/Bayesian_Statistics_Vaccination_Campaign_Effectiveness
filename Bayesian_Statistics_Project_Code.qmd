@@ -1,0 +1,133 @@
+---
+title: "551 Final Project"
+author: "Snigdha Pakala"
+format: pdf
+editor: visual
+---
+
+## Data Preparation and Cleaning
+
+```{r}
+# Load required libraries
+library(dplyr)
+library(ggplot2)
+library(rstan)
+library(bayesplot)
+
+# Load CDC Dataset
+data <- read.csv("~/Downloads/Vaccination_Coverage_among_Adults__18__Years__20241210.csv")
+names(data)
+
+# Initial data exploration for cleaning
+data %>% distinct(Dimension)
+
+# To reduce the scope of this research question, made the following data filters:
+#   - Focuses only on Pneumococcal vaccination (2018-2021) to use largest data available 
+#   - Accounts for two distinct age groups with different recommendations: 
+#       1. Adults 18-64 years at increased risk
+#       2. All adults ≥65 years
+# 
+
+vax_data <- data %>%
+  filter(
+    Vaccine == "Pneumococcal",
+    Survey.Year >= 2018,
+    Survey.Year <= 2021,
+    !Geography %in% c("New Jersey", "Florida"), # No data available for certain years
+    !Dimension %in% c("Overall") # Avoid repetition
+  ) %>%
+  mutate(
+    # Convert percentage and sample size
+    Estimate.... = as.numeric(Estimate....),
+    Sample.Size = as.numeric(Sample.Size),
+    total = Sample.Size,
+    vaccinated = round(Estimate.... * Sample.Size / 100),
+    time_period = case_when(
+      Survey.Year < 2020 ~ 0,
+      Survey.Year == 2020 ~ 1,
+      Survey.Year > 2020 ~ 2
+    ),
+    community = as.numeric(factor(Geography, levels = unique(Geography))),
+    age_group = ifelse(Dimension.Type == "≥65 Years", 2, 1),
+    ci_bounds = strsplit(as.character(X95..CI....), " to "),
+    ci_lower = as.numeric(sapply(ci_bounds, `[`, 1)),
+    ci_upper = as.numeric(sapply(ci_bounds, `[`, 2)),
+    ci_width = ci_upper - ci_lower) %>%
+  filter(!is.na(Estimate....), 
+         !is.na(Sample.Size),
+         Estimate.... != "NR",
+         X95..CI.... != "NR")
+
+vax_data <- vax_data %>%
+  arrange(Geography) %>%  # Sort by Geography alphabetically
+  mutate(
+    community = dense_rank(Geography) # Use dense_rank to ensure consecutive integers
+  )
+
+vax_data %>% distinct(Geography)
+vax_data %>% distinct(community)
+
+
+# Verify data structure
+print(paste("Number of observations:", nrow(vax_data)))
+print("Distribution by age group:")
+print(table(vax_data$Dimension.Type))
+print("Distribution by year:")
+print(table(vax_data$Survey.Year))
+
+# Ensure there are no more NAs in data
+colSums(is.na(vax_data))
+
+# Verify the mapping
+print(length(unique(vax_data$community)))  # Should be 71
+print(max(vax_data$community))  # Should also be 71
+
+
+# Initial understanding of trends
+
+state_data <- vax_data %>%
+  filter(Geography.Type == "States/Local Areas")
+
+# Calculate average vaccination rate for each state
+state_avg <- state_data %>%
+  group_by(Geography) %>%
+  summarize(avg_rate = mean(Estimate...., na.rm = TRUE)) %>%
+  ungroup()
+
+# Vaccination rates by state 
+ggplot(state_avg, aes(x = reorder(Geography, avg_rate), y = avg_rate, fill = avg_rate)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(title = "Average Pneumococcal Vaccination Rates by State",
+       x = "State",
+       y = "Average Vaccination Rate (%)",
+       fill = "Vaccination Rate (%)") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 6))
+
+# Vaccination rates by age group
+ggplot(state_data, aes(x = as.factor(Dimension.Type), 
+                       y = Estimate...., 
+                       fill = as.factor(Dimension.Type))) +
+  geom_boxplot() +
+  labs(title = "Pneumococcal Vaccination Rates by Age Group",
+       x = "Age Group",
+       y = "Vaccination Rate (%)",
+       fill = "Age Group") +
+  scale_x_discrete(labels = c("18-64 years (at risk)", "≥65 years")) +
+  scale_fill_discrete(labels = c("18-64 years (at risk)", "≥65 years")) +
+  theme_minimal()
+
+# Vaccination rates over time 
+state_data %>%
+  group_by(Survey.Year) %>%
+  summarize(avg_rate = mean(Estimate...., na.rm = TRUE)) %>%
+  ggplot(aes(x = Survey.Year, y = avg_rate)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Pneumococcal Vaccination Rates Over Time",
+       x = "Year",
+       y = "Average Vaccination Rate (%)") +
+  theme_minimal()
+```
