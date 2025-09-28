@@ -1,0 +1,150 @@
+---
+title: "551 Model Checking and Results"
+format: pdf
+editor: visual
+---
+
+## Model Checking and Results
+
+```{r}
+# Trace plots with improved aesthetics
+mcmc_trace(fit, 
+          pars = c("beta", "gamma", "mu_alpha", "sigma_alpha"),
+          facet_args = list(ncol = 2)) +
+  theme_minimal() +
+  ggtitle("Trace Plots of Key Parameters") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Autocorrelation plots with more lags
+mcmc_acf(fit,
+         pars = c("beta", "gamma", "mu_alpha", "sigma_alpha"),
+         lags = 20) +
+  theme_minimal() +
+  ggtitle("Autocorrelation Plots") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Additional diagnostic plots
+# Density plots
+mcmc_dens_overlay(fit, 
+                 pars = c("beta", "gamma", "mu_alpha", "sigma_alpha")) +
+  theme_minimal() +
+  ggtitle("Parameter Posterior Densities") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Pairs plot for parameter correlation
+pairs(fit, 
+      pars = c("beta", "gamma", "mu_alpha", "sigma_alpha"))
+
+# Prior Predictive Check
+prior_code <- "
+data {
+  int<lower=1> N;
+  int<lower=1> R;
+  int<lower=1> total[N];
+}
+
+generated quantities {
+  real mu_alpha = normal_rng(logit(0.65), 0.5);
+  real<lower=0> sigma_alpha = fabs(normal_rng(0, 0.5));
+  real beta = normal_rng(0, 0.5);
+  real gamma = normal_rng(0, 0.5);
+  vector[R] alpha_raw;
+  vector[R] alpha;
+  vector[N] y_prior;
+  
+  // Generate alpha_raw one element at a time
+  for (r in 1:R) {
+    alpha_raw[r] = normal_rng(0, 1);
+  }
+  
+  alpha = mu_alpha + sigma_alpha * alpha_raw;
+  
+  for (i in 1:N) {
+    real logit_p = alpha[1] + beta * 0.5 + gamma * 0.5;  // Using average values
+    y_prior[i] = binomial_rng(total[i], inv_logit(logit_p));
+  }
+}
+"
+
+prior_fit <- stan(
+  model_code = prior_code, 
+  data = list(N = stan_data_simple$N, 
+              R = stan_data_simple$R, 
+              total = stan_data_simple$total), 
+  algorithm = "Fixed_param", 
+  iter = 1000)
+
+# Plot prior predictive distribution
+y_prior <- as.matrix(prior_fit, pars = "y_prior")
+
+ppc_dens_overlay(y = stan_data_simple$y, yrep = y_prior[1:50,]) +
+  ggtitle("Prior Predictive Check") +
+  theme_minimal()
+
+# Posterior Predictive Check
+y_rep <- as.matrix(fit, pars = "y_rep")
+
+ppc_dens_overlay(y = stan_data_simple$y, yrep = y_rep[1:50,]) +
+  ggtitle("Posterior Predictive Check") +
+  theme_minimal()
+
+# Additional posterior predictive checks
+ppc_scatter_avg(y = stan_data_simple$y, yrep = y_rep) +
+  ggtitle("Posterior Predictive Check: Average") +
+  theme_minimal()
+
+ppc_stat(y = stan_data_simple$y, yrep = y_rep, stat = "mean") +
+  ggtitle("Posterior Predictive Check: Mean") +
+  theme_minimal()
+
+ppc_intervals(y = stan_data_simple$y, yrep = y_rep, prob = 0.5) +
+  ggtitle("Posterior Predictive Check: 50% Intervals") +
+  theme_minimal()
+
+as.data.frame(summary(fit)$summary[, "n_eff"])
+
+as.data.frame(max(summary(fit)$summary[, "Rhat"]))
+
+# Extract posterior samples for campaign effect (beta parameter)
+campaign_effect <- rstan::extract(fit, pars = "beta")$beta
+
+# Calculate probability of negative impact
+prob_negative <- mean(campaign_effect < 0)
+
+# Calculate effect size and uncertainty
+campaign_summary <- data.frame(
+  mean_effect = mean(campaign_effect),
+  lower_ci = quantile(campaign_effect, 0.025),
+  upper_ci = quantile(campaign_effect, 0.975)
+)
+
+# Calculate predicted probabilities for pre/post COVID
+predicted_probs <- function(beta_samples, mu_alpha_samples) {
+  pre_covid <- plogis(mu_alpha_samples)
+  post_covid <- plogis(mu_alpha_samples + beta_samples)
+  return(data.frame(pre_covid, post_covid))
+}
+
+# Extract samples
+mu_alpha_samples <- rstan::extract(fit, pars = "mu_alpha")$mu_alpha
+probs <- predicted_probs(campaign_effect, mu_alpha_samples)
+
+# Visualize campaign effect
+ggplot(data.frame(effect = campaign_effect), aes(x = effect)) +
+  geom_density(fill = "lightblue", alpha = 0.7) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  theme_minimal() +
+  ggtitle("Posterior Distribution of Campaign Effect") +
+  xlab("Effect Size (log-odds scale)") +
+  ylab("Density")
+
+# Compare pre/post probabilities
+ggplot(probs) +
+  geom_density(aes(x = pre_covid, fill = "Pre-COVID"), alpha = 0.5) +
+  geom_density(aes(x = post_covid, fill = "Post-COVID"), alpha = 0.5) +
+  theme_minimal() +
+  ggtitle("Vaccination Probabilities Pre/Post COVID") +
+  xlab("Probability of Vaccination") +
+  scale_fill_manual(values = c("blue", "red"), name = "Period")
+
+```

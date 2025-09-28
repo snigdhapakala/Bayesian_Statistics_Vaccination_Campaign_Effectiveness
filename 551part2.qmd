@@ -1,0 +1,170 @@
+---
+title: "551 Model Creation"
+format: pdf
+editor: visual
+---
+
+## Model Creation
+
+```{r}
+# Load required libraries
+library(dplyr)
+library(ggplot2)
+library(rstan)
+library(bayesplot)
+
+# Load CDC Dataset
+data <- read.csv("~/Downloads/Vaccination_Coverage_among_Adults__18__Years__20241210.csv")
+
+vax_data <- data %>%
+  filter(
+    Vaccine == "Pneumococcal",
+    Survey.Year >= 2018,
+    Survey.Year <= 2021,
+    !Geography %in% c("New Jersey", "Florida"), # No data available for certain years
+    !Dimension %in% c("Overall") # Avoid repetition
+  ) %>%
+  mutate(
+    # Convert percentage and sample size
+    Estimate.... = as.numeric(Estimate....),
+    Sample.Size = as.numeric(Sample.Size),
+    total = Sample.Size,
+    vaccinated = round(Estimate.... * Sample.Size / 100),
+    time_period = case_when(
+      Survey.Year < 2020 ~ 0,
+      Survey.Year == 2020 ~ 1,
+      Survey.Year > 2020 ~ 2
+    ),
+    community = as.numeric(factor(Geography, levels = unique(Geography))),
+    age_group = ifelse(Dimension.Type == "≥65 Years", 2, 1),
+    ci_bounds = strsplit(as.character(X95..CI....), " to "),
+    ci_lower = as.numeric(sapply(ci_bounds, `[`, 1)),
+    ci_upper = as.numeric(sapply(ci_bounds, `[`, 2)),
+    ci_width = ci_upper - ci_lower) %>%
+  filter(!is.na(Estimate....), 
+         !is.na(Sample.Size),
+         Estimate.... != "NR",
+         X95..CI.... != "NR")
+ 
+# Simplify data by focusing on key variables and reducing complexity
+vax_data_simple <- data %>%
+  filter(
+    Vaccine == "Pneumococcal",
+    Survey.Year >= 2018,
+    Survey.Year <= 2021,
+    !Geography %in% c("New Jersey", "Florida"),
+    # Remove Overall category
+    !Dimension %in% c("Overall")
+  ) %>%
+  mutate(
+    vaccinated = round(as.numeric(Estimate....) * as.numeric(Sample.Size) / 100),
+    total = as.numeric(Sample.Size),
+    # Simplify time periods to before/after COVID
+    time_period = ifelse(Survey.Year < 2020, 0, 1),
+    # Keep age grouping
+    age_group = ifelse(Dimension.Type == "≥65 Years", 2, 1),
+    # Simplify geography to regions instead of states
+    region = case_when(
+      Geography %in% c("Maine", "Vermont", "New Hampshire", "Massachusetts", 
+                      "Rhode Island", "Connecticut") ~ 1,
+      Geography %in% c("New York", "Pennsylvania") ~ 2,
+      Geography %in% c("Michigan", "Wisconsin", "Minnesota", "Illinois", 
+                      "Indiana", "Ohio") ~ 3,
+      TRUE ~ 4
+    )
+  ) %>%
+  # Remove missing values
+  filter(!is.na(vaccinated), 
+         !is.na(total),
+         total > 0)
+
+# Prepare simplified Stan data
+stan_data_simple <- list(
+  N = nrow(vax_data_simple),
+  R = length(unique(vax_data_simple$region)),
+  y = vax_data_simple$vaccinated,
+  total = vax_data_simple$total,
+  region = vax_data_simple$region,
+  time_period = vax_data_simple$time_period,
+  age_group = vax_data_simple$age_group,
+  weights = vax_data_simple$total / sum(vax_data_simple$total)
+)
+
+# Simplified Stan model
+stan_code_simple <- 
+"data {
+  int<lower=1> N;
+  int<lower=1> R;
+  int<lower=0> y[N];
+  int<lower=1> total[N];
+  int<lower=1,upper=R> region[N];
+  int<lower=0,upper=1> time_period[N];
+  int<lower=1,upper=2> age_group[N];
+  vector[N] weights;
+}
+
+parameters {
+  vector[R] alpha_raw;
+  real beta;
+  real gamma;
+  real mu_alpha;
+  real<lower=0> sigma_alpha;
+}
+
+transformed parameters {
+  vector[R] alpha = mu_alpha + sigma_alpha * alpha_raw;
+}
+
+model {
+  // Informative priors based on CDC data
+  mu_alpha ~ normal(logit(0.65), 0.5);
+  sigma_alpha ~ normal(0, 0.5);
+  beta ~ normal(0, 0.5);
+  gamma ~ normal(0, 0.5);
+  alpha_raw ~ std_normal();
+  
+  // Likelihood
+  {
+    vector[N] logit_p;
+    for (i in 1:N) {
+      logit_p[i] = alpha[region[i]] + 
+                   beta * time_period[i] + 
+                   gamma * (age_group[i] - 1);
+    }
+    target += weights .* binomial_logit_lpmf(y | total, logit_p);
+  }
+}
+
+generated quantities {
+  vector[N] log_lik;
+  vector[N] y_rep;
+  {
+    vector[N] logit_p;
+    for (i in 1:N) {
+      logit_p[i] = alpha[region[i]] + 
+                   beta * time_period[i] + 
+                   gamma * (age_group[i] - 1);
+      log_lik[i] = binomial_logit_lpmf(y[i] | total[i], inv_logit(logit_p[i]));
+      y_rep[i] = binomial_rng(total[i], inv_logit(logit_p[i]));
+    }
+  }
+}
+"
+
+fit <- stan(
+  model_code = stan_code_simple,
+  data = stan_data_simple,
+  chains = 4,
+  iter = 3000,        
+  warmup = 1500,      
+  #thin = 2,          
+  control = list(
+    adapt_delta = 0.99,     
+    max_treedepth = 12     
+  )
+)
+
+
+```
+
+## 
